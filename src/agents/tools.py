@@ -82,18 +82,17 @@ def list_documents() -> str:
 @tool
 def summarize_document(doc_name: str) -> str:
     """总结指定文档的主要内容。参数 doc_name: 文档名"""
-    from src.rag.loader import load_document
-    from langchain_openai import ChatOpenAI
-    from src.config import settings as cfg
-
     file_path = os.path.join(settings.data_dir, doc_name)
     if not os.path.exists(file_path):
         return f"文档不存在: {doc_name}"
 
     try:
+        from src.rag.loader import load_document
+        from langchain_openai import ChatOpenAI
+        from src.config import settings as cfg
+
         documents = load_document(file_path)
         full_text = "\n\n".join(doc.page_content for doc in documents)
-        # 截断过长文本
         if len(full_text) > 4000:
             full_text = full_text[:4000] + "...(已截断)"
 

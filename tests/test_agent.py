@@ -14,42 +14,42 @@ from src.agents.tools import calculate, list_documents, search_knowledge_base, s
 
 class TestCalculate:
     def test_simple_addition(self):
-        assert "12" in calculate("5 + 7")
+        assert "12" in calculate.invoke({"expression": "5 + 7"})
 
     def test_multiplication(self):
-        assert "14" in calculate("2 * 7")
+        assert "14" in calculate.invoke({"expression": "2 * 7"})
 
     def test_complex_expression(self):
-        result = calculate("2 + 3 * 4")
+        result = calculate.invoke({"expression": "2 + 3 * 4"})
         assert "14" in result
 
     def test_float_calculation(self):
-        result = calculate("1.5 + 2.5")
+        result = calculate.invoke({"expression": "1.5 + 2.5"})
         assert "4" in result
 
     def test_unsafe_expression_blocked(self):
         """不允许函数调用"""
-        result = calculate("print('hello')")
+        result = calculate.invoke({"expression": "print('hello')"})
         assert "不安全" in result
 
     def test_attribute_access_blocked(self):
         """不允许属性访问"""
-        result = calculate("''.__class__")
+        result = calculate.invoke({"expression": "''.__class__"})
         assert "不安全" in result
 
     def test_name_access_blocked(self):
         """不允许变量名（除 True/False/None）"""
-        result = calculate("os.system('rm -rf /')")
+        result = calculate.invoke({"expression": "os.system('rm -rf /')"})
         assert "不安全" in result
 
     def test_boolean_constants_allowed(self):
         """True/False/None 应被允许"""
-        result = calculate("True + True")
+        result = calculate.invoke({"expression": "True + True"})
         assert "2" in result
 
     def test_invalid_expression(self):
         """无效表达式应返回错误"""
-        result = calculate("abc + def")
+        result = calculate.invoke({"expression": "abc + def"})
         assert "不安全" in result or "失败" in result
 
 
@@ -137,26 +137,31 @@ class TestListDocuments:
 class TestSummarizeDocument:
     def test_nonexistent_document(self):
         """不存在的文档应返回错误"""
-        result = summarize_document.invoke({"doc_name": "nonexistent.pdf"})
-        assert "不存在" in result
-
-    @patch("src.agents.tools.ChatOpenAI")
-    def test_summarize_success(self, mock_llm_class):
-        """正常文档应返回摘要"""
-        mock_llm = MagicMock()
-        mock_llm.invoke.return_value.content = "这是摘要内容"
-        mock_llm_class.return_value = mock_llm
-
         with tempfile.TemporaryDirectory() as tmpdir:
             from src.config import settings
             original_data_dir = settings.data_dir
             settings.data_dir = tmpdir
 
-            # 创建测试 Markdown 文件
+            result = summarize_document.invoke({"doc_name": "nonexistent.pdf"})
+            assert "不存在" in result
+
+            settings.data_dir = original_data_dir
+
+    def test_summarize_success(self):
+        """正常文档应返回摘要"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            from src.config import settings
+            original_data_dir = settings.data_dir
+            settings.data_dir = tmpdir
+
             with open(os.path.join(tmpdir, "test.md"), "w", encoding="utf-8") as f:
                 f.write("# 测试文档\n\n这是测试内容。")
 
-            with patch("src.agents.tools.load_document") as mock_load:
+            mock_llm = MagicMock()
+            mock_llm.invoke.return_value.content = "这是摘要内容"
+
+            with patch("langchain_openai.ChatOpenAI", return_value=mock_llm), \
+                 patch("src.rag.loader.load_document") as mock_load:
                 mock_load.return_value = [
                     Document(page_content="这是测试内容。", metadata={"source": "test.md"})
                 ]
@@ -169,15 +174,17 @@ class TestSummarizeDocument:
 # ===== QAAgent 测试 =====
 
 class TestQAAgent:
-    def test_agent_not_initialized(self):
+    @patch("src.agents.qa_agent.ChatOpenAI")
+    def test_agent_not_initialized(self, mock_llm_class):
         """未初始化的 Agent 应抛出异常"""
         from src.agents.qa_agent import QAAgent
         agent = QAAgent()
-        agent.agent_executor = None
+        agent._chain = None
         with pytest.raises(ValueError, match="Agent 未初始化"):
             agent.run("测试问题")
 
-    def test_update_retriever(self):
+    @patch("src.agents.qa_agent.ChatOpenAI")
+    def test_update_retriever(self, mock_llm_class):
         """update_retriever 应调用全局设置"""
         from src.agents.qa_agent import QAAgent
 
