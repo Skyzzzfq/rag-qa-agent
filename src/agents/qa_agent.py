@@ -2,7 +2,6 @@ from langchain_openai import ChatOpenAI
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
 
 from src.agents.tools import set_retriever, set_documents
 from src.config import settings
@@ -23,6 +22,29 @@ QA_PROMPT = """你是一个智能文档问答助手。请根据以下检索到�
 {context}
 
 用户问题: {question}"""
+
+REFLECTION_PROMPT = """你是一个回答质量审查员。请检查以下回答是否存在问题。
+
+用户问题: {question}
+
+检索到的文档内容:
+{context}
+
+AI 的回答:
+{answer}
+
+请从以下三个维度审查，逐一判断是否通过：
+1. 事实性：回答中的事实是否都来自检索到的文档内容，有没有编造信息？
+2. 完整性：回答是否充分回应了用户问题，有没有遗漏关键点？
+3. 一致性：回答内部是否存在自相矛盾的地方？
+
+请用以下格式输出：
+事实性: 通过/不通过 - 原因
+完整性: 通过/不通过 - 原因
+一致性: 通过/不通过 - 原因
+最终结论: 通过/不通过
+
+如果最终结论为"不通过"，请在下一行用一句话说明需要改进的方向。"""
 
 
 class QAAgent:
@@ -47,8 +69,8 @@ class QAAgent:
         ])
         self._chain = (
             {
-                "context": lambda x: self._retrieve(x["question"]),
-                "question": RunnablePassthrough(),
+                "context": lambda x: x["context"],
+                "question": lambda x: x["question"],
                 "chat_history": lambda x: x.get("chat_history", []),
             }
             | prompt
@@ -62,8 +84,27 @@ class QAAgent:
         set_retriever(retriever)
         set_documents(documents)
 
-    def _retrieve(self, question: str) -> str:
-        """检索并格式化上下文"""
+    def _reflect(self, question: str, context: str, answer: str) -> tuple[bool, str]:
+        """反思纠错：检查回答质量，返回 (是否通过, 改进方向)"""
+        reflection_chain = ChatPromptTemplate.from_template(REFLECTION_PROMPT) | self.llm | StrOutputParser()
+        result = reflection_chain.invoke({
+            "question": question,
+            "context": context,
+            "answer": answer,
+        })
+        passed = "最终结论: 通过" in result
+        suggestion = ""
+        if not passed:
+            for line in result.split("\n"):
+                line = line.strip()
+                if line and not line.startswith(("事实性", "完整性", "一致性", "最终结论")):
+                    suggestion = line
+                    break
+        logger.info(f"反思结果: passed={passed}, suggestion='{suggestion[:50]}'")
+        return passed, suggestion
+
+    def _retrieve_context(self, question: str) -> str:
+        """检索并返回格式化的上下文"""
         from src.agents.tools import _hybrid_retriever
         if _hybrid_retriever is None:
             return "知识库尚未初始化，请先上传文档。"
@@ -84,26 +125,60 @@ class QAAgent:
             return f"检索失败: {e}"
 
     def run(self, question: str, chat_history: list = None) -> dict:
-        """执行问答"""
+        """执行问答（含反思纠错）"""
         if self._chain is None:
             raise ValueError("Agent 未初始化，请先调用 setup_agent")
 
-        answer = self._chain.invoke({
-            "question": question,
-            "chat_history": chat_history or [],
-        })
+        max_retries = settings.reflection_max_retries
+        current_question = question
+
+        for attempt in range(max_retries + 1):
+            context = self._retrieve_context(current_question)
+            answer = self._chain.invoke({
+                "question": current_question,
+                "context": context,
+                "chat_history": chat_history or [],
+            })
+
+            if attempt < max_retries:
+                passed, suggestion = self._reflect(current_question, context, answer)
+                if passed:
+                    logger.info(f"反思通过，第 {attempt + 1} 次生成即合格")
+                    break
+                logger.info(f"反思未通过，改进方向: {suggestion[:50]}，开始第 {attempt + 2} 次尝试")
+                current_question = f"{question}\n\n[反思改进要求: {suggestion}]"
+            else:
+                logger.info(f"达到最大重试次数 {max_retries}，使用当前回答")
+
         sources = list({doc.metadata.get("source", "") for doc in self._context_docs if doc.metadata.get("source")})
         logger.info(f"问答完成: question='{question[:50]}...', sources={sources}")
         return {"answer": answer, "sources": sources}
 
     async def arun(self, question: str, chat_history: list = None) -> dict:
-        """异步执行问答"""
+        """异步执行问答（含反思纠错）"""
         if self._chain is None:
             raise ValueError("Agent 未初始化，请先调用 setup_agent")
 
-        answer = await self._chain.ainvoke({
-            "question": question,
-            "chat_history": chat_history or [],
-        })
+        max_retries = settings.reflection_max_retries
+        current_question = question
+
+        for attempt in range(max_retries + 1):
+            context = self._retrieve_context(current_question)
+            answer = await self._chain.ainvoke({
+                "question": current_question,
+                "context": context,
+                "chat_history": chat_history or [],
+            })
+
+            if attempt < max_retries:
+                passed, suggestion = self._reflect(current_question, context, answer)
+                if passed:
+                    logger.info(f"反思通过，第 {attempt + 1} 次生成即合格")
+                    break
+                logger.info(f"反思未通过，改进方向: {suggestion[:50]}，开始第 {attempt + 2} 次尝试")
+                current_question = f"{question}\n\n[反思改进要求: {suggestion}]"
+            else:
+                logger.info(f"达到最大重试次数 {max_retries}，使用当前回答")
+
         sources = list({doc.metadata.get("source", "") for doc in self._context_docs if doc.metadata.get("source")})
         return {"answer": answer, "sources": sources}

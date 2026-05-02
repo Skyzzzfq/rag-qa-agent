@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     chunk_overlap: int = 50
     retrieval_top_k: int = 5
 
+    # 反思纠错
+    reflection_max_retries: int = 2
+
     # 对话记忆
     conversation_window: int = 5
 
