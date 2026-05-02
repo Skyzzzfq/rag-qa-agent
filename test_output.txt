@@ -1,0 +1,4 @@
+Answer: Python的创始人是Guido van Rossum。  
+
+信息来源：[1] simple.md
+Sources: ['simple.md']

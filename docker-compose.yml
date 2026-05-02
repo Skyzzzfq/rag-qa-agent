@@ -1,0 +1,15 @@
+version: "3.8"
+
+services:
+  rag-agent-qa:
+    build: .
+    container_name: rag-agent-qa
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./indexes:/app/indexes
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    restart: unless-stopped
