@@ -110,12 +110,14 @@ class TestListDocuments:
             # 创建测试文件
             open(os.path.join(tmpdir, "test.md"), "w").close()
             open(os.path.join(tmpdir, "doc.pdf"), "w").close()
-            open(os.path.join(tmpdir, "ignore.txt"), "w").close()
+            open(os.path.join(tmpdir, "note.txt"), "w").close()
+            open(os.path.join(tmpdir, "ignore.xlsx"), "w").close()
 
             result = list_documents.invoke({})
             assert "test.md" in result
             assert "doc.pdf" in result
-            assert "ignore.txt" not in result
+            assert "note.txt" in result
+            assert "ignore.xlsx" not in result
 
             settings.data_dir = original_data_dir
 
@@ -179,7 +181,7 @@ class TestQAAgent:
         """未初始化的 Agent 应抛出异常"""
         from src.agents.qa_agent import QAAgent
         agent = QAAgent()
-        agent._chain = None
+        agent._executor = None
         with pytest.raises(ValueError, match="Agent 未初始化"):
             agent.run("测试问题")
 
@@ -196,3 +198,67 @@ class TestQAAgent:
             agent.update_retriever(mock_retriever, docs)
             mock_set_ret.assert_called_once_with(mock_retriever)
             mock_set_docs.assert_called_once_with(docs)
+
+    @patch("src.agents.qa_agent.ChatOpenAI")
+    def test_setup_agent_creates_executor(self, mock_llm_class):
+        """setup_agent 应创建 AgentExecutor 并包含工具"""
+        from src.agents.qa_agent import QAAgent
+        agent = QAAgent()
+        assert agent._executor is None
+        agent.setup_agent()
+        assert agent._executor is not None
+        assert len(agent._executor.tools) == 4
+
+    def test_extract_sources(self):
+        """_extract_sources 应从中间步骤中提取来源"""
+        from src.agents.qa_agent import QAAgent
+
+        agent = QAAgent.__new__(QAAgent)
+        steps = [
+            (MagicMock(tool="search_knowledge_base"),
+             "[1] 来源: doc1.md (第1页)\n内容1"),
+            (MagicMock(tool="calculate"),
+             "计算结果: 42"),
+            (MagicMock(tool="search_knowledge_base"),
+             "[1] 来源: doc2.md\n内容2"),
+        ]
+        sources = agent._extract_sources(steps)
+        assert "doc1.md" in sources
+        assert "doc2.md" in sources
+        assert len(sources) == 2
+
+    def test_build_context_from_steps(self):
+        """_build_context_from_steps 应拼接知识库检索结果"""
+        from src.agents.qa_agent import QAAgent
+
+        agent = QAAgent.__new__(QAAgent)
+        steps = [
+            (MagicMock(tool="search_knowledge_base"), "检索结果1"),
+            (MagicMock(tool="calculate"), "计算结果: 42"),
+            (MagicMock(tool="search_knowledge_base"), "检索结果2"),
+        ]
+        context = agent._build_context_from_steps(steps)
+        assert "检索结果1" in context
+        assert "检索结果2" in context
+        assert "42" not in context
+
+    @patch("src.agents.qa_agent.ChatOpenAI")
+    def test_run_with_executor(self, mock_llm_class):
+        """run() 应使用 executor 并提取来源"""
+        from src.agents.qa_agent import QAAgent
+
+        agent = QAAgent()
+        mock_result = {
+            "output": "Python是一种编程语言",
+            "intermediate_steps": [
+                (MagicMock(tool="search_knowledge_base"),
+                 "[1] 来源: intro.md\nPython 是一种编程语言"),
+            ],
+        }
+        agent._executor = MagicMock()
+        agent._executor.invoke.return_value = mock_result
+        agent._reflect = MagicMock(return_value=(True, ""))
+
+        result = agent.run("什么是Python")
+        assert result["answer"] == "Python是一种编程语言"
+        assert "intro.md" in result["sources"]

@@ -1,27 +1,25 @@
 from langchain_openai import ChatOpenAI
-from langchain_core.documents import Document
+from langchain.agents import create_tool_calling_agent, AgentExecutor
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.output_parsers import StrOutputParser
 
-from src.agents.tools import set_retriever, set_documents
+from src.agents.tools import get_all_tools, set_retriever, set_documents
 from src.config import settings
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-QA_PROMPT = """你是一个智能文档问答助手。请根据以下检索到的文档内容回答用户的问题。
+SYSTEM_PROMPT = """你是一个智能文档问答助手，可以使用工具来回答问题。
 
-约束条件:
-- 仅根据检索到的文档内容回答，不确定时明确说明
+严格的约束条件:
+- 必须使用 search_knowledge_base 工具检索知识库中的相关内容
+- 只能根据工具返回的文档内容回答，禁止使用你自身的知识进行补充或扩展
+- 文档中没提到的信息，即使你知道，也绝对不能添加
+- 如果文档内容不足以完整回答问题，请明确说明"文档中未提及"相关内容
 - 不要编造信息
 - 如果检索结果与问题无关，请如实说明知识库中没有相关内容
 - 回答使用中文
-- 在回答末尾标注信息来源
-
-检索到的文档内容:
-{context}
-
-用户问题: {question}"""
+- 在回答末尾标注信息来源"""
 
 REFLECTION_PROMPT = """你是一个回答质量审查员。请检查以下回答是否存在问题。
 
@@ -33,13 +31,15 @@ REFLECTION_PROMPT = """你是一个回答质量审查员。请检查以下回答
 AI 的回答:
 {answer}
 
-请从以下三个维度审查，逐一判断是否通过：
+请从以下四个维度审查，逐一判断是否通过：
 1. 事实性：回答中的事实是否都来自检索到的文档内容，有没有编造信息？
-2. 完整性：回答是否充分回应了用户问题，有没有遗漏关键点？
-3. 一致性：回答内部是否存在自相矛盾的地方？
+2. 来源纯度：回答是否使用了模型自身知识进行补充？文档未提及的内容出现在回答中即为不通过。
+3. 完整性：回答是否充分回应了用户问题，有没有遗漏关键点？
+4. 一致性：回答内部是否存在自相矛盾的地方？
 
 请用以下格式输出：
 事实性: 通过/不通过 - 原因
+来源纯度: 通过/不通过 - 原因
 完整性: 通过/不通过 - 原因
 一致性: 通过/不通过 - 原因
 最终结论: 通过/不通过
@@ -48,7 +48,7 @@ AI 的回答:
 
 
 class QAAgent:
-    """问答 Agent：检索增强生成（RAG）"""
+    """问答 Agent：基于 Tool Calling 的 RAG 智能体"""
 
     def __init__(self) -> None:
         self.llm = ChatOpenAI(
@@ -57,29 +57,31 @@ class QAAgent:
             model=settings.llm_model_name,
             temperature=0,
         )
-        self._chain = None
-        self._context_docs: list[Document] = []
+        self._executor: AgentExecutor | None = None
 
     def setup_agent(self, tools: list = None) -> None:
-        """创建 RAG 问答链"""
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", QA_PROMPT),
-            MessagesPlaceholder("chat_history", optional=True),
-            ("human", "{question}"),
-        ])
-        self._chain = (
-            {
-                "context": lambda x: x["context"],
-                "question": lambda x: x["question"],
-                "chat_history": lambda x: x.get("chat_history", []),
-            }
-            | prompt
-            | self.llm
-            | StrOutputParser()
-        )
-        logger.info("RAG 问答链已创建")
+        """创建 Tool Calling Agent 和 AgentExecutor"""
+        if tools is None:
+            tools = get_all_tools()
 
-    def update_retriever(self, retriever, documents: list[Document]) -> None:
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", SYSTEM_PROMPT),
+            MessagesPlaceholder("chat_history", optional=True),
+            ("human", "{input}"),
+            MessagesPlaceholder("agent_scratchpad"),
+        ])
+
+        agent = create_tool_calling_agent(self.llm, tools, prompt)
+        self._executor = AgentExecutor(
+            agent=agent,
+            tools=tools,
+            verbose=True,
+            handle_parsing_errors=True,
+            max_iterations=10,
+        )
+        logger.info(f"Tool Calling Agent 已创建，工具数: {len(tools)}")
+
+    def update_retriever(self, retriever, documents) -> None:
         """更新检索器和文档列表"""
         set_retriever(retriever)
         set_documents(documents)
@@ -103,45 +105,47 @@ class QAAgent:
         logger.info(f"反思结果: passed={passed}, suggestion='{suggestion[:50]}'")
         return passed, suggestion
 
-    def _retrieve_context(self, question: str) -> str:
-        """检索并返回格式化的上下文"""
-        from src.agents.tools import _hybrid_retriever
-        if _hybrid_retriever is None:
-            return "知识库尚未初始化，请先上传文档。"
-        try:
-            docs = _hybrid_retriever.retrieve(question)
-            self._context_docs = docs
-            if not docs:
-                return "未找到相关文档内容。"
-            parts = []
-            for i, doc in enumerate(docs, start=1):
-                source = doc.metadata.get("source", "未知来源")
-                page = doc.metadata.get("page", "")
-                page_info = f" (第{page}页)" if page else ""
-                parts.append(f"[{i}] 来源: {source}{page_info}\n{doc.page_content}")
-            return "\n\n---\n\n".join(parts)
-        except Exception as e:
-            logger.error(f"检索失败: {e}")
-            return f"检索失败: {e}"
+    def _extract_sources(self, intermediate_steps: list) -> list[str]:
+        """从 Agent 中间步骤中提取文档来源"""
+        sources = set()
+        for action, output in intermediate_steps:
+            if getattr(action, "tool", None) == "search_knowledge_base":
+                for line in output.split("\n"):
+                    stripped = line.strip()
+                    if "来源:" in stripped:
+                        source = stripped.split("来源:")[-1].strip()
+                        if "(" in source:
+                            source = source.split("(")[0].strip()
+                        if source:
+                            sources.add(source)
+        return list(sources)
+
+    def _build_context_from_steps(self, intermediate_steps: list) -> str:
+        """从 Agent 中间步骤中提取检索到的上下文文本"""
+        parts = []
+        for action, output in intermediate_steps:
+            if getattr(action, "tool", None) == "search_knowledge_base":
+                parts.append(output)
+        return "\n\n---\n\n".join(parts) if parts else "（未使用知识库检索）"
 
     def run(self, question: str, chat_history: list = None) -> dict:
         """执行问答（含反思纠错）"""
-        if self._chain is None:
+        if self._executor is None:
             raise ValueError("Agent 未初始化，请先调用 setup_agent")
 
         max_retries = settings.reflection_max_retries
         current_question = question
 
         for attempt in range(max_retries + 1):
-            context = self._retrieve_context(current_question)
-            answer = self._chain.invoke({
-                "question": current_question,
-                "context": context,
+            result = self._executor.invoke({
+                "input": current_question,
                 "chat_history": chat_history or [],
             })
+            answer = result["output"]
+            context_str = self._build_context_from_steps(result.get("intermediate_steps", []))
 
             if attempt < max_retries:
-                passed, suggestion = self._reflect(current_question, context, answer)
+                passed, suggestion = self._reflect(current_question, context_str, answer)
                 if passed:
                     logger.info(f"反思通过，第 {attempt + 1} 次生成即合格")
                     break
@@ -150,28 +154,28 @@ class QAAgent:
             else:
                 logger.info(f"达到最大重试次数 {max_retries}，使用当前回答")
 
-        sources = list({doc.metadata.get("source", "") for doc in self._context_docs if doc.metadata.get("source")})
+        sources = self._extract_sources(result.get("intermediate_steps", []))
         logger.info(f"问答完成: question='{question[:50]}...', sources={sources}")
         return {"answer": answer, "sources": sources}
 
     async def arun(self, question: str, chat_history: list = None) -> dict:
         """异步执行问答（含反思纠错）"""
-        if self._chain is None:
+        if self._executor is None:
             raise ValueError("Agent 未初始化，请先调用 setup_agent")
 
         max_retries = settings.reflection_max_retries
         current_question = question
 
         for attempt in range(max_retries + 1):
-            context = self._retrieve_context(current_question)
-            answer = await self._chain.ainvoke({
-                "question": current_question,
-                "context": context,
+            result = await self._executor.ainvoke({
+                "input": current_question,
                 "chat_history": chat_history or [],
             })
+            answer = result["output"]
+            context_str = self._build_context_from_steps(result.get("intermediate_steps", []))
 
             if attempt < max_retries:
-                passed, suggestion = self._reflect(current_question, context, answer)
+                passed, suggestion = self._reflect(current_question, context_str, answer)
                 if passed:
                     logger.info(f"反思通过，第 {attempt + 1} 次生成即合格")
                     break
@@ -180,5 +184,47 @@ class QAAgent:
             else:
                 logger.info(f"达到最大重试次数 {max_retries}，使用当前回答")
 
-        sources = list({doc.metadata.get("source", "") for doc in self._context_docs if doc.metadata.get("source")})
+        sources = self._extract_sources(result.get("intermediate_steps", []))
         return {"answer": answer, "sources": sources}
+
+    async def astream_events(self, question: str, chat_history: list = None):
+        """流式执行 Agent，逐 token 推送工具状态和最终回答"""
+        if self._executor is None:
+            raise ValueError("Agent 未初始化，请先调用 setup_agent")
+
+        # 策略：on_tool_end 后立即流式推送 token；
+        #       如果中途又 on_tool_start，发 reset 事件通知前端清空已显示内容。
+        after_tool_end = False
+
+        async for event in self._executor.astream_events(
+            {"input": question, "chat_history": chat_history or []},
+            version="v2",
+        ):
+            kind = event["event"]
+
+            if kind == "on_tool_start":
+                after_tool_end = False
+                yield {
+                    "type": "tool_start",
+                    "data": {"tool": event["name"]},
+                }
+            elif kind == "on_tool_end":
+                after_tool_end = True
+                yield {
+                    "type": "tool_end",
+                    "data": {"tool": event["name"]},
+                }
+            elif kind == "on_chat_model_stream":
+                chunk = event["data"]["chunk"]
+                content = chunk.content if hasattr(chunk, "content") else str(chunk)
+                if isinstance(content, str) and content:
+                    # on_tool_end 之后、下一次 on_tool_start 之前的 token 属于最终回答
+                    if after_tool_end:
+                        yield {"type": "token", "data": content}
+            elif kind == "on_chain_end" and event.get("name") == "AgentExecutor":
+                output = event.get("data", {}).get("output")
+                if isinstance(output, dict):
+                    answer = output.get("output", "")
+                    if answer and not after_tool_end:
+                        # 兜底：Agent 直接返回文本回答（没调用工具的情况）
+                        yield {"type": "token", "data": answer}

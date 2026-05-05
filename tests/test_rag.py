@@ -74,12 +74,44 @@ class TestLoader:
         """不支持的格式应抛出异常"""
         from src.rag.loader import load_document
 
-        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
             f.write(b"hello")
             f.flush()
             with pytest.raises(ValueError, match="不支持的文件格式"):
                 load_document(f.name)
         os.unlink(f.name)
+
+    def test_load_txt_file(self):
+        """测试 TXT 文件加载"""
+        from src.rag.loader import load_document
+
+        with tempfile.NamedTemporaryFile(suffix=".txt", delete=False, mode="w", encoding="utf-8") as f:
+            f.write("这是一段纯文本内容。")
+            f.flush()
+            docs = load_document(f.name)
+        os.unlink(f.name)
+
+        assert len(docs) >= 1
+        assert "纯文本" in docs[0].page_content
+        assert docs[0].metadata["type"] == "txt"
+
+    def test_load_docx_file(self):
+        """测试 Word (.docx) 文件加载"""
+        from src.rag.loader import load_document
+        from docx import Document as DocxDocument
+
+        with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as f:
+            doc = DocxDocument()
+            doc.add_paragraph("这是 Word 文档的第一段内容。")
+            doc.add_paragraph("这是第二段内容。")
+            doc.save(f.name)
+            docs = load_document(f.name)
+        os.unlink(f.name)
+
+        assert len(docs) >= 1
+        assert "第一段" in docs[0].page_content
+        assert "第二段" in docs[0].page_content
+        assert docs[0].metadata["type"] == "docx"
 
     def test_load_nonexistent_file(self):
         """不存在的文件应抛出 FileNotFoundError"""

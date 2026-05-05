@@ -113,9 +113,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
   <div class="sidebar" id="sidebar">
     <div class="sidebar-header">文档管理</div>
     <div class="upload-area">
-      <input type="file" id="fileInput" accept=".pdf,.md,.markdown" style="display:none" onchange="uploadFile(this)">
+      <input type="file" id="fileInput" accept=".pdf,.md,.markdown,.txt,.docx" style="display:none" onchange="uploadFile(this)">
       <button class="upload-btn" onclick="document.getElementById('fileInput').click()">+ 上传文档</button>
-      <div style="font-size:12px;color:var(--text-light);margin-top:8px;text-align:center">支持 PDF、Markdown 格式</div>
+      <div style="font-size:12px;color:var(--text-light);margin-top:8px;text-align:center">支持 PDF、Markdown、TXT、Word 格式</div>
     </div>
     <div class="doc-list" id="docList"></div>
   </div>
@@ -231,16 +231,74 @@ async function sendQuestion() {
   const typingEl = addTyping();
 
   try {
-    const resp = await fetch('/qa/ask', {
+    const resp = await fetch('/qa/ask/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question, session_id: sessionId })
     });
     if (!resp.ok) { const err = await resp.json(); throw new Error(err.detail || '请求失败'); }
-    const data = await resp.json();
-    sessionId = data.session_id;
+
     typingEl.remove();
-    addMessage('bot', data.answer, data.sources);
+    const botBubble = addMessage('bot', '');
+    const bubbleEl = botBubble.querySelector('.msg-bubble');
+    const statusArea = document.createElement('div');
+    statusArea.className = 'msg-status';
+    botBubble.insertBefore(statusArea, bubbleEl);
+    let fullAnswer = '';
+    let toolActive = false;
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let currentEvent = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (line.startsWith('event:')) {
+          currentEvent = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          const data = line.slice(5).trim();
+          if (!data) continue;
+
+          if (currentEvent === 'token') {
+            if (toolActive) {
+              statusArea.innerHTML = '';
+              toolActive = false;
+            }
+            fullAnswer += data;
+            bubbleEl.textContent = fullAnswer;
+            document.getElementById('chatMessages').scrollTop = document.getElementById('chatMessages').scrollHeight;
+          } else if (currentEvent === 'tool_start') {
+            toolActive = true;
+            try {
+              const info = JSON.parse(data);
+              statusArea.innerHTML = '<span class="source-tag" style="background:#fef3c7;color:#92400e">🔧 正在调用 ' + info.tool + '...</span>';
+            } catch(e) {}
+            document.getElementById('chatMessages').scrollTop = document.getElementById('chatMessages').scrollHeight;
+          } else if (currentEvent === 'tool_end') {
+            try {
+              const info = JSON.parse(data);
+              statusArea.innerHTML = '<span class="source-tag" style="background:#d1fae5;color:#065f46">✅ ' + info.tool + ' 已返回</span>';
+            } catch(e) {}
+            document.getElementById('chatMessages').scrollTop = document.getElementById('chatMessages').scrollHeight;
+          } else if (currentEvent === 'error') {
+            fullAnswer += data;
+            bubbleEl.textContent = fullAnswer;
+          } else if (currentEvent === 'done') {
+            statusArea.innerHTML = '';
+          }
+          currentEvent = '';
+        }
+      }
+    }
+    statusArea.innerHTML = '';
+    bubbleEl.textContent = fullAnswer;
   } catch (e) {
     typingEl.remove();
     addMessage('bot', '抱歉，出了点问题：' + e.message);
@@ -270,6 +328,7 @@ function addMessage(role, text, sources) {
 
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
+  return div;
 }
 
 function addTyping() {

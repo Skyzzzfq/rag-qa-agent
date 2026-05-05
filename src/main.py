@@ -44,7 +44,7 @@ async def lifespan(app: FastAPI):
             if os.path.exists(data_dir):
                 for fname in os.listdir(data_dir):
                     ext = os.path.splitext(fname)[1].lower()
-                    if ext in {".pdf", ".md", ".markdown"}:
+                    if ext in {".pdf", ".md", ".markdown", ".txt", ".docx"}:
                         docs = load_document(os.path.join(data_dir, fname))
                         chunks = split_documents(docs)
                         all_docs.extend(chunks)

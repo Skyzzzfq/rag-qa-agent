@@ -1,3 +1,4 @@
+import json
 import os
 import uuid
 
@@ -72,7 +73,7 @@ async def upload_document(file: UploadFile = File(...)):
     """上传文档并自动构建索引"""
     filename = file.filename
     ext = os.path.splitext(filename)[1].lower()
-    if ext not in {".pdf", ".md", ".markdown"}:
+    if ext not in {".pdf", ".md", ".markdown", ".txt", ".docx"}:
         raise HTTPException(status_code=400, detail=f"不支持的文件格式: {ext}")
 
     file_path = os.path.join(settings.data_dir, filename)
@@ -114,7 +115,7 @@ async def upload_document(file: UploadFile = File(...)):
 @router.post("/qa/ask", response_model=AskResponse)
 async def ask_question(request: AskRequest):
     """问答接口"""
-    if qa_agent._chain is None:
+    if qa_agent._executor is None:
         raise HTTPException(status_code=503, detail="Agent 尚未初始化，请先上传文档")
 
     session_id = request.session_id or str(uuid.uuid4())
@@ -137,8 +138,8 @@ async def ask_question(request: AskRequest):
 
 @router.post("/qa/ask/stream")
 async def ask_question_stream(request: AskRequest):
-    """流式问答接口（SSE）"""
-    if qa_agent._chain is None:
+    """流式问答接口（SSE），逐 token 和工具调用事件推送"""
+    if qa_agent._executor is None:
         raise HTTPException(status_code=503, detail="Agent 尚未初始化，请先上传文档")
 
     session_id = request.session_id or str(uuid.uuid4())
@@ -146,14 +147,23 @@ async def ask_question_stream(request: AskRequest):
     chat_history = memory.load_memory_variables({}).get("chat_history", [])
 
     async def event_generator():
+        full_answer = ""
         try:
-            result = await qa_agent.arun(request.question, chat_history=chat_history)
-            memory.save_context({"input": request.question}, {"output": result["answer"]})
-            yield {"event": "final_answer", "data": result["answer"]}
+            async for event in qa_agent.astream_events(request.question, chat_history=chat_history):
+                event_type = event["type"]
+                if event_type == "tool_start":
+                    yield {"event": "tool_start", "data": json.dumps(event["data"], ensure_ascii=False)}
+                elif event_type == "tool_end":
+                    yield {"event": "tool_end", "data": json.dumps(event["data"], ensure_ascii=False)}
+                elif event_type == "token":
+                    full_answer += event["data"]
+                    yield {"event": "token", "data": event["data"]}
+
+            memory.save_context({"input": request.question}, {"output": full_answer})
+            yield {"event": "done", "data": ""}
         except Exception as e:
             logger.error(f"流式问答失败: {e}")
             yield {"event": "error", "data": str(e)}
-        finally:
             yield {"event": "done", "data": ""}
 
     return EventSourceResponse(event_generator())
@@ -176,7 +186,7 @@ async def list_all_documents():
     supported = [
         DocumentInfo(filename=f)
         for f in files
-        if os.path.splitext(f)[1].lower() in {".pdf", ".md", ".markdown"}
+        if os.path.splitext(f)[1].lower() in {".pdf", ".md", ".markdown", ".txt", ".docx"}
     ]
     return DocumentListResponse(documents=supported)
 

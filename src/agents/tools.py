@@ -73,7 +73,7 @@ def list_documents() -> str:
     if not os.path.exists(data_dir):
         return "文档目录不存在。"
     files = os.listdir(data_dir)
-    supported = [f for f in files if os.path.splitext(f)[1].lower() in {".pdf", ".md", ".markdown"}]
+    supported = [f for f in files if os.path.splitext(f)[1].lower() in {".pdf", ".md", ".markdown", ".txt", ".docx"}]
     if not supported:
         return "知识库中暂无文档。"
     return "已加载的文档:\n" + "\n".join(f"  - {f}" for f in supported)
@@ -108,3 +108,8 @@ def summarize_document(doc_name: str) -> str:
     except Exception as e:
         logger.error(f"文档摘要失败: {doc_name}, 错误: {e}")
         return f"生成摘要失败: {e}"
+
+
+def get_all_tools() -> list:
+    """返回所有可用工具的列表"""
+    return [search_knowledge_base, calculate, list_documents, summarize_document]

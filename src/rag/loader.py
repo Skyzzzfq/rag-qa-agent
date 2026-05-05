@@ -8,7 +8,7 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-SUPPORTED_EXTENSIONS = {".pdf", ".md", ".markdown"}
+SUPPORTED_EXTENSIONS = {".pdf", ".md", ".markdown", ".txt", ".docx"}
 
 
 def load_pdf(file_path: str) -> list[Document]:
@@ -59,6 +59,55 @@ def load_markdown(file_path: str) -> list[Document]:
     return documents
 
 
+def load_txt(file_path: str) -> list[Document]:
+    """加载纯文本文件"""
+    documents: list[Document] = []
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            text = f.read().strip()
+        if text:
+            documents.append(
+                Document(
+                    page_content=text,
+                    metadata={
+                        "source": os.path.basename(file_path),
+                        "type": "txt",
+                    },
+                )
+            )
+        logger.info(f"TXT 加载完成: {file_path}")
+    except Exception as e:
+        logger.error(f"TXT 加载失败: {file_path}, 错误: {e}")
+        raise
+    return documents
+
+
+def load_docx(file_path: str) -> list[Document]:
+    """加载 Word (.docx) 文件"""
+    from docx import Document as DocxDocument
+
+    documents: list[Document] = []
+    try:
+        doc = DocxDocument(file_path)
+        paragraphs = [para.text.strip() for para in doc.paragraphs if para.text.strip()]
+        if paragraphs:
+            full_text = "\n\n".join(paragraphs)
+            documents.append(
+                Document(
+                    page_content=full_text,
+                    metadata={
+                        "source": os.path.basename(file_path),
+                        "type": "docx",
+                    },
+                )
+            )
+        logger.info(f"DOCX 加载完成: {file_path}, 段落数: {len(paragraphs)}")
+    except Exception as e:
+        logger.error(f"DOCX 加载失败: {file_path}, 错误: {e}")
+        raise
+    return documents
+
+
 def load_document(file_path: str) -> list[Document]:
     """统一文档加载接口，根据文件扩展名自动选择加载器"""
     path = Path(file_path)
@@ -73,5 +122,9 @@ def load_document(file_path: str) -> list[Document]:
         return load_pdf(file_path)
     elif ext in (".md", ".markdown"):
         return load_markdown(file_path)
+    elif ext == ".txt":
+        return load_txt(file_path)
+    elif ext == ".docx":
+        return load_docx(file_path)
 
     return []
