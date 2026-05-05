@@ -9,6 +9,9 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+EMBEDDING_BATCH_SIZE = 10
+
+
 class VectorStoreManager:
     """FAISS 向量存储管理，支持创建、保存、加载和增量添加文档"""
 
@@ -18,8 +21,15 @@ class VectorStoreManager:
     def create_from_documents(
         self, documents: list[Document], embeddings: Embeddings
     ) -> FAISS:
-        """从文档创建 FAISS 索引"""
-        self.vectorstore = FAISS.from_documents(documents, embeddings)
+        """从文档创建 FAISS 索引（分批嵌入，每批不超过 EMBEDDING_BATCH_SIZE）"""
+        if len(documents) <= EMBEDDING_BATCH_SIZE:
+            self.vectorstore = FAISS.from_documents(documents, embeddings)
+        else:
+            self.vectorstore = FAISS.from_documents(documents[:EMBEDDING_BATCH_SIZE], embeddings)
+            for i in range(EMBEDDING_BATCH_SIZE, len(documents), EMBEDDING_BATCH_SIZE):
+                batch = documents[i:i + EMBEDDING_BATCH_SIZE]
+                self.vectorstore.add_documents(batch)
+                logger.info(f"嵌入批次 {i // EMBEDDING_BATCH_SIZE + 1}: {len(batch)} 条")
         logger.info(f"FAISS 索引创建完成，文档数: {len(documents)}")
         return self.vectorstore
 
@@ -48,8 +58,11 @@ class VectorStoreManager:
             return None
 
     def add_documents(self, documents: list[Document]) -> None:
-        """向已有索引增量添加文档"""
+        """向已有索引增量添加文档（分批嵌入）"""
         if self.vectorstore is None:
             raise ValueError("索引未初始化，请先创建或加载索引")
-        self.vectorstore.add_documents(documents)
+        for i in range(0, len(documents), EMBEDDING_BATCH_SIZE):
+            batch = documents[i:i + EMBEDDING_BATCH_SIZE]
+            self.vectorstore.add_documents(batch)
+            logger.info(f"增量批次 {i // EMBEDDING_BATCH_SIZE + 1}: {len(batch)} 条")
         logger.info(f"增量添加文档完成，新增: {len(documents)} 个块")
