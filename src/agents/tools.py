@@ -1,5 +1,6 @@
 import ast
 import os
+from pathlib import Path
 
 from langchain_core.documents import Document
 from langchain_core.tools import tool
@@ -82,8 +83,11 @@ def list_documents() -> str:
 @tool
 def summarize_document(doc_name: str) -> str:
     """总结指定文档的主要内容。参数 doc_name: 文档名"""
-    file_path = os.path.join(settings.data_dir, doc_name)
-    if not os.path.exists(file_path):
+    data_dir = Path(settings.data_dir).resolve()
+    file_path = (data_dir / doc_name).resolve()
+    if not doc_name or Path(doc_name).name != doc_name or file_path.parent != data_dir:
+        return f"无效的文档名: {doc_name}"
+    if not file_path.exists():
         return f"文档不存在: {doc_name}"
 
     try:
@@ -91,7 +95,7 @@ def summarize_document(doc_name: str) -> str:
         from langchain_openai import ChatOpenAI
         from src.config import settings as cfg
 
-        documents = load_document(file_path)
+        documents = load_document(str(file_path))
         full_text = "\n\n".join(doc.page_content for doc in documents)
         if len(full_text) > 4000:
             full_text = full_text[:4000] + "...(已截断)"

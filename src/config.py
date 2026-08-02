@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     chunk_size: int = 500
     chunk_overlap: int = 50
     retrieval_top_k: int = 5
+    max_upload_size_mb: int = 20
 
     # 反思纠错
     reflection_max_retries: int = 2
