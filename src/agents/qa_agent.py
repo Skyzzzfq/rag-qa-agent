@@ -78,6 +78,7 @@ class QAAgent:
             verbose=True,
             handle_parsing_errors=True,
             max_iterations=10,
+            return_intermediate_steps=True,
         )
         logger.info(f"Tool Calling Agent 已创建，工具数: {len(tools)}")
 
@@ -90,6 +91,25 @@ class QAAgent:
         """反思纠错：检查回答质量，返回 (是否通过, 改进方向)"""
         reflection_chain = ChatPromptTemplate.from_template(REFLECTION_PROMPT) | self.llm | StrOutputParser()
         result = reflection_chain.invoke({
+            "question": question,
+            "context": context,
+            "answer": answer,
+        })
+        passed = "最终结论: 通过" in result
+        suggestion = ""
+        if not passed:
+            for line in result.split("\n"):
+                line = line.strip()
+                if line and not line.startswith(("事实性", "完整性", "一致性", "最终结论")):
+                    suggestion = line
+                    break
+        logger.info(f"反思结果: passed={passed}, suggestion='{suggestion[:50]}'")
+        return passed, suggestion
+
+    async def _areflect(self, question: str, context: str, answer: str) -> tuple[bool, str]:
+        """异步检查回答质量，避免阻塞异步请求。"""
+        reflection_chain = ChatPromptTemplate.from_template(REFLECTION_PROMPT) | self.llm | StrOutputParser()
+        result = await reflection_chain.ainvoke({
             "question": question,
             "context": context,
             "answer": answer,
@@ -118,7 +138,7 @@ class QAAgent:
                             source = source.split("(")[0].strip()
                         if source:
                             sources.add(source)
-        return list(sources)
+        return sorted(sources)
 
     def _build_context_from_steps(self, intermediate_steps: list) -> str:
         """从 Agent 中间步骤中提取检索到的上下文文本"""
@@ -175,7 +195,7 @@ class QAAgent:
             context_str = self._build_context_from_steps(result.get("intermediate_steps", []))
 
             if attempt < max_retries:
-                passed, suggestion = self._reflect(current_question, context_str, answer)
+                passed, suggestion = await self._areflect(current_question, context_str, answer)
                 if passed:
                     logger.info(f"反思通过，第 {attempt + 1} 次生成即合格")
                     break
@@ -188,43 +208,9 @@ class QAAgent:
         return {"answer": answer, "sources": sources}
 
     async def astream_events(self, question: str, chat_history: list = None):
-        """流式执行 Agent，逐 token 推送工具状态和最终回答"""
-        if self._executor is None:
-            raise ValueError("Agent 未初始化，请先调用 setup_agent")
-
-        # 策略：on_tool_end 后立即流式推送 token；
-        #       如果中途又 on_tool_start，发 reset 事件通知前端清空已显示内容。
-        after_tool_end = False
-
-        async for event in self._executor.astream_events(
-            {"input": question, "chat_history": chat_history or []},
-            version="v2",
-        ):
-            kind = event["event"]
-
-            if kind == "on_tool_start":
-                after_tool_end = False
-                yield {
-                    "type": "tool_start",
-                    "data": {"tool": event["name"]},
-                }
-            elif kind == "on_tool_end":
-                after_tool_end = True
-                yield {
-                    "type": "tool_end",
-                    "data": {"tool": event["name"]},
-                }
-            elif kind == "on_chat_model_stream":
-                chunk = event["data"]["chunk"]
-                content = chunk.content if hasattr(chunk, "content") else str(chunk)
-                if isinstance(content, str) and content:
-                    # on_tool_end 之后、下一次 on_tool_start 之前的 token 属于最终回答
-                    if after_tool_end:
-                        yield {"type": "token", "data": content}
-            elif kind == "on_chain_end" and event.get("name") == "AgentExecutor":
-                output = event.get("data", {}).get("output")
-                if isinstance(output, dict):
-                    answer = output.get("output", "")
-                    if answer and not after_tool_end:
-                        # 兜底：Agent 直接返回文本回答（没调用工具的情况）
-                        yield {"type": "token", "data": answer}
+        """执行完整反思流程后，以 SSE 友好的事件格式返回结果。"""
+        result = await self.arun(question, chat_history=chat_history)
+        yield {"type": "sources", "data": result["sources"]}
+        answer = result["answer"]
+        for start in range(0, len(answer), 12):
+            yield {"type": "token", "data": answer[start:start + 12]}

@@ -1,8 +1,9 @@
 """Agent 模块单元测试：工具调用、Agent 执行"""
 
+import asyncio
 import os
 import tempfile
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langchain_core.documents import Document
@@ -149,6 +150,11 @@ class TestSummarizeDocument:
 
             settings.data_dir = original_data_dir
 
+    def test_rejects_document_outside_data_directory(self):
+        """摘要工具不能读取数据目录之外的文件。"""
+        result = summarize_document.invoke({"doc_name": "../secret.txt"})
+        assert "无效的文档名" in result
+
     def test_summarize_success(self):
         """正常文档应返回摘要"""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -208,6 +214,7 @@ class TestQAAgent:
         agent.setup_agent()
         assert agent._executor is not None
         assert len(agent._executor.tools) == 4
+        assert agent._executor.return_intermediate_steps is True
 
     def test_extract_sources(self):
         """_extract_sources 应从中间步骤中提取来源"""
@@ -262,3 +269,40 @@ class TestQAAgent:
         result = agent.run("什么是Python")
         assert result["answer"] == "Python是一种编程语言"
         assert "intro.md" in result["sources"]
+
+    @patch("src.agents.qa_agent.ChatOpenAI")
+    def test_async_run_uses_async_reflection(self, mock_llm_class):
+        """异步问答必须走异步反思并保留来源。"""
+        from src.agents.qa_agent import QAAgent
+
+        agent = QAAgent()
+        agent._executor = MagicMock()
+        agent._executor.ainvoke = AsyncMock(return_value={
+            "output": "异步回答",
+            "intermediate_steps": [
+                (MagicMock(tool="search_knowledge_base"), "[1] 来源: async.md\n内容"),
+            ],
+        })
+        agent._areflect = AsyncMock(return_value=(True, ""))
+
+        result = asyncio.run(agent.arun("异步问题"))
+
+        assert result == {"answer": "异步回答", "sources": ["async.md"]}
+        agent._areflect.assert_awaited_once()
+
+    def test_stream_events_include_sources_and_complete_answer(self):
+        """流式事件必须来自完成反思后的最终结果。"""
+        from src.agents.qa_agent import QAAgent
+
+        agent = QAAgent.__new__(QAAgent)
+        agent.arun = AsyncMock(return_value={
+            "answer": "这是最终回答",
+            "sources": ["source.md"],
+        })
+
+        async def collect_events():
+            return [event async for event in agent.astream_events("问题")]
+
+        events = asyncio.run(collect_events())
+        assert events[0] == {"type": "sources", "data": ["source.md"]}
+        assert "".join(event["data"] for event in events[1:]) == "这是最终回答"

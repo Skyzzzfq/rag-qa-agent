@@ -165,19 +165,38 @@ async function loadDocuments() {
 
 function renderDocList(docs) {
   const el = document.getElementById('docList');
+  el.replaceChildren();
   if (!docs.length) {
-    el.innerHTML = '<div class="empty-docs">暂无文档<br>请上传 PDF 或 Markdown 文件</div>';
+    const empty = document.createElement('div');
+    empty.className = 'empty-docs';
+    empty.append('暂无文档', document.createElement('br'), '请上传 PDF、Markdown、TXT 或 Word 文件');
+    el.appendChild(empty);
     return;
   }
-  el.innerHTML = docs.map(d => {
+  docs.forEach(d => {
     const ext = d.filename.split('.').pop().toLowerCase();
     const icon = ext === 'pdf' ? '📕' : '📄';
-    return `<div class="doc-item">
-      <span class="doc-icon">${icon}</span>
-      <span class="doc-name" title="${d.filename}">${d.filename}</span>
-      <button class="doc-del" title="删除" onclick="deleteDoc('${d.filename}')">×</button>
-    </div>`;
-  }).join('');
+    const item = document.createElement('div');
+    item.className = 'doc-item';
+
+    const iconEl = document.createElement('span');
+    iconEl.className = 'doc-icon';
+    iconEl.textContent = icon;
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'doc-name';
+    nameEl.title = d.filename;
+    nameEl.textContent = d.filename;
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'doc-del';
+    deleteBtn.title = '删除';
+    deleteBtn.textContent = '×';
+    deleteBtn.addEventListener('click', () => deleteDoc(d.filename));
+
+    item.append(iconEl, nameEl, deleteBtn);
+    el.appendChild(item);
+  });
 }
 
 async function uploadFile(input) {
@@ -245,6 +264,7 @@ async function sendQuestion() {
     statusArea.className = 'msg-status';
     botBubble.insertBefore(statusArea, bubbleEl);
     let fullAnswer = '';
+    let sources = [];
     let toolActive = false;
 
     const reader = resp.body.getReader();
@@ -266,25 +286,31 @@ async function sendQuestion() {
           const data = line.slice(5).trim();
           if (!data) continue;
 
-          if (currentEvent === 'token') {
+          if (currentEvent === 'session') {
+            sessionId = data;
+          } else if (currentEvent === 'sources') {
+            try { sources = JSON.parse(data); } catch(e) { sources = []; }
+          } else if (currentEvent === 'token') {
             if (toolActive) {
               statusArea.innerHTML = '';
               toolActive = false;
             }
-            fullAnswer += data;
+            let token = data;
+            try { token = JSON.parse(data); } catch(e) {}
+            fullAnswer += token;
             bubbleEl.textContent = fullAnswer;
             document.getElementById('chatMessages').scrollTop = document.getElementById('chatMessages').scrollHeight;
           } else if (currentEvent === 'tool_start') {
             toolActive = true;
             try {
               const info = JSON.parse(data);
-              statusArea.innerHTML = '<span class="source-tag" style="background:#fef3c7;color:#92400e">🔧 正在调用 ' + info.tool + '...</span>';
+              setToolStatus(statusArea, `正在调用 ${info.tool}...`, '#fef3c7', '#92400e');
             } catch(e) {}
             document.getElementById('chatMessages').scrollTop = document.getElementById('chatMessages').scrollHeight;
           } else if (currentEvent === 'tool_end') {
             try {
               const info = JSON.parse(data);
-              statusArea.innerHTML = '<span class="source-tag" style="background:#d1fae5;color:#065f46">✅ ' + info.tool + ' 已返回</span>';
+              setToolStatus(statusArea, `${info.tool} 已返回`, '#d1fae5', '#065f46');
             } catch(e) {}
             document.getElementById('chatMessages').scrollTop = document.getElementById('chatMessages').scrollHeight;
           } else if (currentEvent === 'error') {
@@ -299,6 +325,7 @@ async function sendQuestion() {
     }
     statusArea.innerHTML = '';
     bubbleEl.textContent = fullAnswer;
+    addSources(botBubble, sources);
   } catch (e) {
     typingEl.remove();
     addMessage('bot', '抱歉，出了点问题：' + e.message);
@@ -320,15 +347,37 @@ function addMessage(role, text, sources) {
   div.appendChild(bubble);
 
   if (role === 'bot' && sources && sources.length) {
-    const src = document.createElement('div');
-    src.className = 'msg-source';
-    src.innerHTML = '<span>📋 来源：</span>' + sources.map(s => `<span class="source-tag">${s}</span>`).join('');
-    div.appendChild(src);
+    addSources(div, sources);
   }
 
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
   return div;
+}
+
+function addSources(messageEl, sources) {
+  if (!sources || !sources.length) return;
+  const src = document.createElement('div');
+  src.className = 'msg-source';
+  const label = document.createElement('span');
+  label.textContent = '来源：';
+  src.appendChild(label);
+  sources.forEach(source => {
+    const tag = document.createElement('span');
+    tag.className = 'source-tag';
+    tag.textContent = source;
+    src.appendChild(tag);
+  });
+  messageEl.appendChild(src);
+}
+
+function setToolStatus(statusArea, text, background, color) {
+  const tag = document.createElement('span');
+  tag.className = 'source-tag';
+  tag.style.background = background;
+  tag.style.color = color;
+  tag.textContent = text;
+  statusArea.replaceChildren(tag);
 }
 
 function addTyping() {
