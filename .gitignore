@@ -23,6 +23,7 @@ data/
 
 # 日志
 logs/
+test_output.txt
 
 # 系统文件
 .DS_Store
